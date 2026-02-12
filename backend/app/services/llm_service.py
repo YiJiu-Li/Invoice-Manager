@@ -132,6 +132,9 @@ class OpenAIProvider(BaseLLMProvider):
                     kwargs = {"api_key": settings.openai_api_key}
                     if settings.openai_base_url:
                         kwargs["base_url"] = settings.openai_base_url
+                        # Override User-Agent for custom base URLs to avoid
+                        # Cloudflare WAF blocking "OpenAI/Python" user agent
+                        kwargs["default_headers"] = {"User-Agent": "python-httpx/0.27.0"}
                     self._client = OpenAI(**kwargs)
         return self._client
 
@@ -197,7 +200,10 @@ class AnthropicProvider(BaseLLMProvider):
             with self._lock:
                 if self._client is None:
                     import anthropic
-                    self._client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+                    kwargs = {"api_key": settings.anthropic_api_key}
+                    if settings.anthropic_base_url:
+                        kwargs["base_url"] = settings.anthropic_base_url
+                    self._client = anthropic.Anthropic(**kwargs)
         return self._client
 
     def is_configured(self) -> bool:
@@ -263,7 +269,12 @@ class GoogleProvider(BaseLLMProvider):
             with self._lock:
                 if self._genai is None:
                     import google.generativeai as genai
-                    genai.configure(api_key=settings.google_api_key)
+                    configure_kwargs = {"api_key": settings.google_api_key}
+                    if settings.google_base_url:
+                        configure_kwargs["client_options"] = {
+                            "api_endpoint": settings.google_base_url
+                        }
+                    genai.configure(**configure_kwargs)
                     self._genai = genai
         return self._genai
 
@@ -424,7 +435,10 @@ class ZhipuProvider(BaseLLMProvider):
             with self._lock:
                 if self._client is None:
                     from zhipuai import ZhipuAI
-                    self._client = ZhipuAI(api_key=settings.zhipu_api_key)
+                    kwargs = {"api_key": settings.zhipu_api_key}
+                    if settings.zhipu_base_url:
+                        kwargs["base_url"] = settings.zhipu_base_url
+                    self._client = ZhipuAI(**kwargs)
         return self._client
 
     def is_configured(self) -> bool:

@@ -92,6 +92,7 @@ class LLMProviderInfo(BaseModel):
     display_name: str
     is_configured: bool
     model: Optional[str] = None
+    base_url: Optional[str] = None
 
 
 class LLMStatusResponse(BaseModel):
@@ -156,6 +157,7 @@ async def get_llm_status():
             display_name=PROVIDER_DISPLAY_NAMES.get(name, name),
             is_configured=name in configured_providers,
             model=_get_provider_model(name) if name in configured_providers else DEFAULT_MODELS.get(name),
+            base_url=_get_provider_base_url(name) if name in configured_providers else None,
         )
         available_providers.append(provider_info)
 
@@ -199,11 +201,11 @@ async def configure_llm(
         # Provider-specific configuration
         provider_config = {
             "openai": ("OPENAI_API_KEY", "OPENAI_MODEL", "OPENAI_BASE_URL"),
-            "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", None),
-            "google": ("GOOGLE_API_KEY", "GOOGLE_MODEL", None),
+            "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL", "ANTHROPIC_BASE_URL"),
+            "google": ("GOOGLE_API_KEY", "GOOGLE_MODEL", "GOOGLE_BASE_URL"),
             "qwen": ("QWEN_API_KEY", "QWEN_MODEL", "QWEN_BASE_URL"),
             "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL", "DEEPSEEK_BASE_URL"),
-            "zhipu": ("ZHIPU_API_KEY", "ZHIPU_MODEL", None),
+            "zhipu": ("ZHIPU_API_KEY", "ZHIPU_MODEL", "ZHIPU_BASE_URL"),
         }
 
         key_name, model_name, base_url_name = provider_config[provider]
@@ -289,6 +291,191 @@ def _get_provider_model(provider_name: str) -> Optional[str]:
         "zhipu": settings.zhipu_model,
     }
     return model_map.get(provider_name)
+
+
+def _get_provider_base_url(provider_name: str) -> Optional[str]:
+    """Get the configured base URL for a provider."""
+    settings = get_settings()
+    url_map = {
+        "openai": settings.openai_base_url,
+        "anthropic": settings.anthropic_base_url,
+        "google": settings.google_base_url,
+        "qwen": settings.qwen_base_url,
+        "deepseek": settings.deepseek_base_url,
+        "zhipu": settings.zhipu_base_url,
+    }
+    return url_map.get(provider_name) or None
+
+
+class ConfigTestRequest(BaseModel):
+    """Request to test LLM config before saving."""
+    provider: str
+    api_key: str
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+
+
+class ConfigTestResponse(BaseModel):
+    """Response for config test."""
+    success: bool
+    message: str
+    response_time_ms: Optional[int] = None
+
+
+# Default base URLs for providers that require them
+_DEFAULT_BASE_URLS = {
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "deepseek": "https://api.deepseek.com",
+}
+
+
+def _test_openai_compatible(client, model: str) -> str:
+    """Test an OpenAI-compatible client, with fallback to Responses API."""
+    try:
+        # Try Chat Completions API first (standard OpenAI)
+        stream = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "Reply with exactly: OK"},
+            ],
+            temperature=0.1,
+            max_tokens=10,
+            stream=True,
+        )
+        parts = []
+        for chunk in stream:
+            if chunk.choices and chunk.choices[0].delta.content:
+                parts.append(chunk.choices[0].delta.content)
+        return "".join(parts).strip()
+    except Exception as e:
+        err_msg = str(e)
+        # If proxy doesn't support Chat Completions, try Responses API
+        if "Unsupported parameter" not in err_msg and "messages" not in err_msg.lower():
+            raise
+        # Fall back to Responses API (used by Codex-compatible proxies)
+        if not hasattr(client, 'responses'):
+            raise RuntimeError(
+                "此代理使用 Responses API，但当前 openai SDK 版本不支持。"
+                "请升级: pip install -U openai"
+            ) from e
+        stream = client.responses.create(
+            model=model,
+            input=[{"role": "user", "content": "Reply with exactly: OK"}],
+            stream=True,
+        )
+        parts = []
+        for event in stream:
+            if getattr(event, 'type', '') == 'response.output_text.delta':
+                parts.append(event.delta)
+        return "".join(parts).strip()
+
+
+@router.post("/llm/test-config", response_model=ConfigTestResponse)
+async def test_llm_config(request: ConfigTestRequest):
+    """Test LLM configuration before saving using the actual provider client library."""
+    import time
+
+    provider = request.provider.lower()
+    if provider not in PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的LLM提供商: {provider}。支持的提供商: {', '.join(PROVIDERS.keys())}"
+        )
+
+    if not request.api_key:
+        raise HTTPException(status_code=400, detail="API密钥不能为空")
+
+    model = request.model or DEFAULT_MODELS.get(provider, "")
+    base_url = request.base_url.strip().rstrip("/") if request.base_url else None
+
+    start = time.monotonic()
+    try:
+        if provider in ("openai", "qwen", "deepseek"):
+            from openai import OpenAI
+            kwargs = {"api_key": request.api_key}
+            effective_url = base_url or _DEFAULT_BASE_URLS.get(provider)
+            if effective_url:
+                kwargs["base_url"] = effective_url
+            # Override User-Agent for custom base URLs to avoid Cloudflare WAF
+            # blocking the default "OpenAI/Python" user agent
+            if base_url:
+                kwargs["default_headers"] = {"User-Agent": "python-httpx/0.27.0"}
+            client = OpenAI(**kwargs)
+            result_text = _test_openai_compatible(client, model)
+
+        elif provider == "anthropic":
+            import anthropic
+            kwargs = {"api_key": request.api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = anthropic.Anthropic(**kwargs)
+            response = client.messages.create(
+                model=model,
+                max_tokens=10,
+                system="You are a helpful assistant.",
+                messages=[{"role": "user", "content": "Reply with exactly: OK"}],
+            )
+            result_text = response.content[0].text.strip()
+
+        elif provider == "google":
+            import google.generativeai as genai
+            configure_kwargs = {"api_key": request.api_key}
+            if base_url:
+                configure_kwargs["client_options"] = {"api_endpoint": base_url}
+            genai.configure(**configure_kwargs)
+            gmodel = genai.GenerativeModel(model)
+            response = gmodel.generate_content("Reply with exactly: OK")
+            result_text = response.text.strip()
+
+        elif provider == "zhipu":
+            from zhipuai import ZhipuAI
+            kwargs = {"api_key": request.api_key}
+            if base_url:
+                kwargs["base_url"] = base_url
+            client = ZhipuAI(**kwargs)
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Reply with exactly: OK"},
+                ],
+                temperature=0.1,
+                max_tokens=10,
+            )
+            result_text = response.choices[0].message.content.strip()
+
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的LLM提供商: {provider}")
+
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        return ConfigTestResponse(
+            success=True,
+            message=f"连接成功，响应: {result_text[:50]}",
+            response_time_ms=elapsed_ms,
+        )
+
+    except Exception as e:
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        error_msg = str(e)
+        if "401" in error_msg or "Unauthorized" in error_msg or "authentication" in error_msg.lower():
+            msg = "API密钥无效或未授权"
+        elif "403" in error_msg or "Forbidden" in error_msg:
+            msg = "API密钥权限不足或访问被拒绝"
+        elif "404" in error_msg or "Not Found" in error_msg:
+            msg = "API地址无效，请检查URL是否正确（对于OpenAI兼容接口，base_url通常需要包含 /v1 路径）"
+        elif "connect" in error_msg.lower() or "timeout" in error_msg.lower():
+            msg = "无法连接到该地址，请检查URL和网络连接"
+        elif "<!DOCTYPE" in error_msg or "<html" in error_msg:
+            msg = "API地址返回了网页而非API响应，请检查URL是否正确"
+        elif "model" in error_msg.lower() and ("not found" in error_msg.lower() or "does not exist" in error_msg.lower()):
+            msg = f"模型不存在，请检查模型名称是否正确"
+        else:
+            # Clean up error message - remove HTML and limit length
+            clean_msg = error_msg.split('\n')[0][:150]
+            msg = f"测试失败: {clean_msg}"
+        logger.error(f"Config test failed for {provider}: {e}")
+        return ConfigTestResponse(success=False, message=msg, response_time_ms=elapsed_ms)
 
 
 class ModelInfo(BaseModel):

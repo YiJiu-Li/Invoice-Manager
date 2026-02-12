@@ -12,6 +12,7 @@ import {
   Tag,
   Divider,
   Tooltip,
+  AutoComplete,
 } from 'antd';
 import {
   SettingOutlined,
@@ -20,7 +21,7 @@ import {
   ApiOutlined,
   EyeOutlined,
 } from '@ant-design/icons';
-import { getLLMStatus, configureLLM, testLLMConnection, getAvailableModels } from '../services/api';
+import { getLLMStatus, configureLLM, testLLMConfig, getAvailableModels } from '../services/api';
 import type { LLMStatusResponse, LLMProviderInfo, ModelInfo } from '../types/invoice';
 
 interface LLMConfigModalProps {
@@ -59,12 +60,9 @@ const FALLBACK_MODELS: Record<string, ModelInfo[]> = {
   ],
 };
 
-// Providers that support custom base URL
-const SUPPORTS_BASE_URL = ['openai', 'qwen', 'deepseek'];
-
 function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
   const [loading, setLoading] = useState(true);
-  const [testing, setTesting] = useState(false);
+  const [testingConfig, setTestingConfig] = useState(false);
   const [configuring, setConfiguring] = useState(false);
   const [status, setStatus] = useState<LLMStatusResponse | null>(null);
   const [selectedProvider, setSelectedProvider] = useState<string>('');
@@ -125,21 +123,22 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
     await fetchModels(provider);
     // Set default model from fetched list
     const providerModels = FALLBACK_MODELS[provider] || [];
+    // Pre-populate base_url from saved config if available
+    const savedProvider = status?.available_providers.find(p => p.name === provider);
     form.setFieldsValue({
       provider,
       model: providerModels[0]?.id || '',
       api_key: '',
-      base_url: '',
+      base_url: savedProvider?.base_url || '',
       config_token: '',
     });
   };
 
-  // Update form model when models are fetched
+  // Update form model when models are fetched (only if empty)
   useEffect(() => {
     if (models.length > 0 && selectedProvider) {
       const currentModel = form.getFieldValue('model');
-      // If current model not in list, set to first available
-      if (!currentModel || !models.find(m => m.id === currentModel)) {
+      if (!currentModel) {
         form.setFieldsValue({ model: models[0].id });
       }
     }
@@ -182,12 +181,28 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
     }
   };
 
-  const handleTest = async () => {
-    setTesting(true);
+  const handleTestConfig = async () => {
+    const values = form.getFieldsValue();
+    if (!values.provider) {
+      message.warning('请先选择LLM提供商');
+      return;
+    }
+    if (!values.api_key?.trim()) {
+      message.warning('请先输入API密钥');
+      return;
+    }
+    setTestingConfig(true);
     try {
-      const result = await testLLMConnection();
+      const result = await testLLMConfig({
+        provider: values.provider,
+        api_key: values.api_key.trim(),
+        model: values.model || undefined,
+        base_url: values.base_url?.trim() || undefined,
+      });
       if (result.success) {
-        message.success(`${result.provider_display} 连接测试成功`);
+        message.success(`${result.message} (${result.response_time_ms}ms)`);
+      } else {
+        message.error(result.message);
       }
     } catch (error: unknown) {
       if (error && typeof error === 'object' && 'response' in error) {
@@ -197,9 +212,9 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
           return;
         }
       }
-      message.error('连接测试失败');
+      message.error('配置测试失败');
     } finally {
-      setTesting(false);
+      setTestingConfig(false);
     }
   };
 
@@ -254,11 +269,6 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
               type="success"
               showIcon={false}
               style={{ marginBottom: 16 }}
-              action={
-                <Button size="small" onClick={handleTest} loading={testing}>
-                  测试连接
-                </Button>
-              }
             />
           ) : (
             <Alert
@@ -328,10 +338,9 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
                 </Space>
               }
             >
-              <Select
-                placeholder="选择模型"
+              <AutoComplete
+                placeholder={modelsLoading ? '加载模型列表...' : '选择或输入模型名称'}
                 allowClear
-                loading={modelsLoading}
                 options={models.map((m) => ({
                   label: (
                     <Space>
@@ -345,18 +354,19 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
                   ),
                   value: m.id,
                 }))}
+                filterOption={(input, option) =>
+                  (option?.value as string)?.toLowerCase().includes(input.toLowerCase())
+                }
               />
             </Form.Item>
 
-            {SUPPORTS_BASE_URL.includes(selectedProvider) && (
-              <Form.Item
-                name="base_url"
-                label="自定义 API 地址 (可选)"
-                tooltip="用于兼容OpenAI接口的其他服务"
-              >
-                <Input placeholder="例如: https://api.example.com/v1" />
-              </Form.Item>
-            )}
+            <Form.Item
+              name="base_url"
+              label="自定义 API 地址 (可选)"
+              tooltip="用于自定义API端点或代理服务"
+            >
+              <Input placeholder="例如: https://api.example.com/v1" />
+            </Form.Item>
 
             <Form.Item
               name="config_token"
@@ -369,6 +379,12 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
             <Form.Item style={{ marginBottom: 0, marginTop: 24 }}>
               <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
                 <Button onClick={onClose}>取消</Button>
+                <Button
+                  onClick={handleTestConfig}
+                  loading={testingConfig}
+                >
+                  测试配置
+                </Button>
                 <Button
                   type="primary"
                   onClick={handleConfigure}

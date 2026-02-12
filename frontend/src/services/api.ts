@@ -190,6 +190,14 @@ export const testLLMConnection = async (): Promise<LLMTestResponse> => {
   return response.data;
 };
 
+// Test LLM config before saving (uses actual provider client library)
+export const testLLMConfig = async (
+  config: { provider: string; api_key: string; model?: string; base_url?: string }
+): Promise<{ success: boolean; message: string; response_time_ms?: number }> => {
+  const response = await api.post('/settings/llm/test-config', config);
+  return response.data;
+};
+
 // Get available models for a provider
 export const getAvailableModels = async (
   provider?: string,

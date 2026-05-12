@@ -5,7 +5,7 @@
 ### AI-Powered Chinese Invoice Recognition with Dual-Source Verification
 ### AI驱动的中文发票识别系统 · OCR+LLM双源验证
 
-**v0.3.0** | Latest Release: 2026-01-24
+**v0.3.1** | Latest Release: 2026-05-12
 
 > **Fork 说明** | 本仓库由 [YiJiu-Li](https://github.com/YiJiu-Li) 在原项目基础上二次开发，新增查重、PDF预览动态调整等功能。
 > 原项目地址：[stone16/Invoice-Manager](https://github.com/stone16/Invoice-Manager)
@@ -38,6 +38,8 @@
 - **⚡ Parallel Processing** - OCR and LLM run simultaneously for faster results
 - **🐳 One-Click Deploy** - Docker Compose, ready in 3 minutes
 - **🔒 Privacy First** - Self-hosted, your data never leaves your server
+- **🔎 Duplicate Detection** - Automatically find duplicate invoices by invoice number or key field combination
+- **📐 Resizable PDF Preview** - Drag to resize preview panel, fullscreen mode for better readability
 
 ## ✨ 亮点
 
@@ -47,10 +49,27 @@
 - **⚡ 并行处理** - OCR 和 LLM 同时运行，识别更快
 - **🐳 一键部署** - Docker Compose 启动，3分钟搞定
 - **🔒 数据安全** - 本地私有部署，数据不离开服务器
+- **🔎 发票查重** - 自动检测重复发票，按发票号码或关键字段组合识别
+- **📐 PDF预览增强** - 拖拽调整预览面板宽度，支持全屏查看
 
 ---
 
 ## 📦 版本更新 | Changelog
+
+### v0.3.1 (2026-05-12) - 查重 & PDF预览增强 | by [YiJiu-Li](https://github.com/YiJiu-Li)
+
+**🔎 发票查重功能 | Duplicate Detection**
+- 新增"查重"按钮，一键检测系统内重复发票
+- 双重检测逻辑：① 相同发票号码 ② 销售方税号+购买方税号+开票日期+价税合计完全一致
+- 以分组弹窗展示结果，支持直接跳转重复发票详情页
+- 重复发票列表支持横向滚动，操作列固定右侧
+
+**📐 PDF预览增强 | PDF Preview Improvements**
+- 详情页右侧预览面板支持拖拽调整宽度（300px–900px）
+- 新增全屏预览按钮，在大弹窗中查看 PDF/图片（92vw × 90vh）
+- 拖拽时自动遮罩 iframe，防止鼠标焦点丢失
+
+---
 
 ### v0.3.0 (2026-01-24) - UI 全面改版 | UI Redesign
 

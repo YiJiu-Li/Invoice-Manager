@@ -55,7 +55,11 @@ class Settings(BaseSettings):
     # App
     debug: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env")
+    # Auth
+    jwt_secret_key: str = "invoice-manager-secret-please-change-in-production"
+    jwt_expire_hours: int = 24 * 7  # 7 days
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     def get_active_llm_provider(self) -> Optional[str]:
         """Get the active LLM provider based on configuration."""

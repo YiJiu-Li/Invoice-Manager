@@ -48,6 +48,9 @@ class InvoiceResponse(InvoiceBase):
     file_type: str
     status: InvoiceStatus
     owner: Optional[str] = None
+    uploaded_by_id: Optional[int] = None
+    uploaded_by_username: Optional[str] = None
+    uploaded_by_display_name: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 

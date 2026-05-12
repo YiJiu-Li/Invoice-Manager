@@ -52,6 +52,9 @@ class Invoice(Base):
     tax_rate = Column(String(20), nullable=True)  # 税率
     tax_amount = Column(Numeric(12, 2), nullable=True)  # 税额
 
+    # User association
+    uploaded_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+
     # Status management
     status = Column(SQLEnum(InvoiceStatus), default=InvoiceStatus.PENDING, nullable=False)
     owner = Column(String(100), nullable=True)  # 归属人

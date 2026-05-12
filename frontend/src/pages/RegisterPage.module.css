@@ -1,0 +1,90 @@
+.page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--surface);
+}
+
+.card {
+  width: 400px;
+  background-color: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 48px 40px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.06);
+}
+
+.header {
+  margin-bottom: 32px;
+}
+
+.logoRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.logoMark {
+  width: 28px;
+  height: 28px;
+  background-color: var(--red-primary);
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.logoText {
+  font-family: var(--font-primary);
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--foreground);
+}
+
+.title {
+  font-family: var(--font-primary);
+  font-size: var(--font-size-2xl);
+  font-weight: var(--font-weight-bold);
+  color: var(--foreground);
+  margin: 0 0 8px 0;
+}
+
+.subtitle {
+  font-family: var(--font-secondary);
+  font-size: var(--font-size-sm);
+  color: var(--muted-foreground);
+  margin: 0;
+}
+
+.submitButton {
+  width: 100%;
+  height: 44px;
+  background-color: var(--foreground);
+  border-color: var(--foreground);
+  font-size: var(--font-size-base);
+  font-weight: var(--font-weight-medium);
+  border-radius: 8px;
+  margin-top: 4px;
+}
+
+.submitButton:hover {
+  background-color: #2a2a2a !important;
+  border-color: #2a2a2a !important;
+}
+
+.footer {
+  text-align: center;
+  margin-top: 24px;
+  font-size: var(--font-size-sm);
+  color: var(--muted-foreground);
+}
+
+.footerLink {
+  color: var(--foreground);
+  font-weight: var(--font-weight-medium);
+  text-decoration: none;
+}
+
+.footerLink:hover {
+  text-decoration: underline;
+}

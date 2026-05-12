@@ -13,12 +13,85 @@ import type {
   DuplicateCheckResponse,
 } from '../types/invoice';
 
+import type { AuthUser, TokenResponse, UserCreateRequest } from '../types/user';
+
 const api = axios.create({
   baseURL: '/api',
   headers: {
     'Content-Type': 'application/json',
   },
 });
+
+// Attach JWT token to every request
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('auth_token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// Handle 401: clear stored credentials and redirect to login
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('auth_token');
+      localStorage.removeItem('auth_user');
+      if (!window.location.pathname.startsWith('/login')) {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+// ── Auth API ────────────────────────────────────────────────────────────────
+
+export const loginUser = async (username: string, password: string): Promise<TokenResponse> => {
+  const response = await api.post('/auth/login', { username, password });
+  return response.data;
+};
+
+export const registerUser = async (
+  username: string,
+  password: string,
+  displayName?: string,
+): Promise<TokenResponse> => {
+  const response = await api.post('/auth/register', {
+    username,
+    password,
+    display_name: displayName || undefined,
+  });
+  return response.data;
+};
+
+export const getMe = async (): Promise<AuthUser> => {
+  const response = await api.get('/auth/me');
+  return response.data;
+};
+
+export const changePassword = async (oldPassword: string, newPassword: string): Promise<void> => {
+  await api.post('/auth/change-password', { old_password: oldPassword, new_password: newPassword });
+};
+
+export const listUsers = async (): Promise<AuthUser[]> => {
+  const response = await api.get('/auth/users');
+  return response.data;
+};
+
+export const createUser = async (data: UserCreateRequest): Promise<AuthUser> => {
+  const response = await api.post('/auth/users', data);
+  return response.data;
+};
+
+export const resetUserPassword = async (userId: number, newPassword: string): Promise<void> => {
+  await api.put(`/auth/users/${userId}/reset-password`, { new_password: newPassword });
+};
+
+export const deleteUser = async (userId: number): Promise<void> => {
+  await api.delete(`/auth/users/${userId}`);
+};
 
 // Health check
 export const healthCheck = async () => {
@@ -27,11 +100,12 @@ export const healthCheck = async () => {
 };
 
 // Upload invoices
-export const uploadInvoices = async (files: File[]): Promise<UploadResponse[]> => {
+export const uploadInvoices = async (files: File[], processingMode: string = 'ocr_and_llm'): Promise<UploadResponse[]> => {
   const formData = new FormData();
   files.forEach((file) => {
     formData.append('files', file);
   });
+  formData.append('processing_mode', processingMode);
 
   const response = await api.post('/invoices/upload', formData, {
     headers: {
@@ -62,9 +136,43 @@ export const getInvoice = async (id: number): Promise<InvoiceDetail> => {
   return response.data;
 };
 
-// Get invoice file URL
-export const getInvoiceFileUrl = (id: number, download = false): string => {
-  return download ? `/api/invoices/${id}/file?download=true` : `/api/invoices/${id}/file`;
+export const getAdjacentInvoices = async (id: number): Promise<{ prev_id: number | null; next_id: number | null }> => {
+  const response = await api.get(`/invoices/${id}/adjacent`);
+  return response.data;
+};
+
+// Fetch invoice file as blob (sends auth header, avoids 401)
+export const fetchInvoiceFileBlob = async (id: number): Promise<{ url: string; filename: string }> => {
+  const response = await api.get(`/invoices/${id}/file`, { responseType: 'blob' });
+  const disposition: string = response.headers['content-disposition'] || '';
+  const match = disposition.match(/filename\*?=(?:UTF-8'')?["']?([^"';\n]+)/i);
+  const filename = match ? decodeURIComponent(match[1]) : `invoice-${id}`;
+  const url = URL.createObjectURL(response.data as Blob);
+  return { url, filename };
+};
+
+// Trigger file download using pre-fetched blob URL
+export const downloadBlobUrl = (url: string, filename: string): void => {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+};
+
+// Export invoices (CSV / Excel) via axios so auth header is sent
+export const downloadInvoiceExport = async (format: 'csv' | 'excel', params: URLSearchParams): Promise<void> => {
+  const response = await api.get(`/invoices/export/${format}?${params.toString()}`, { responseType: 'blob' });
+  const ext = format === 'csv' ? 'csv' : 'xlsx';
+  const url = URL.createObjectURL(response.data as Blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `invoices.${ext}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 };
 
 // Update invoice
@@ -146,6 +254,21 @@ export const confirmInvoice = async (
 ): Promise<{ message: string; resolved_count: number }> => {
   const response = await api.post(`/invoices/${invoiceId}/confirm`);
   return response.data;
+};
+
+// Batch confirm invoices
+export const batchConfirmInvoices = async (
+  invoiceIds: number[]
+): Promise<{ success: number; failed: number; errors: string[] }> => {
+  const results = await Promise.allSettled(
+    invoiceIds.map((id) => api.post(`/invoices/${id}/confirm`))
+  );
+  const success = results.filter((r) => r.status === 'fulfilled').length;
+  const failed = results.filter((r) => r.status === 'rejected').length;
+  const errors = results
+    .filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    .map((r) => String(r.reason));
+  return { success, failed, errors };
 };
 
 // Re-process invoice (run OCR/LLM again)

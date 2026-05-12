@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, Any, List, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -129,16 +130,13 @@ def _has_meaningful_fields(fields: Dict[str, Any]) -> bool:
     return False
 
 
-async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
-    """Process an invoice: run OCR and LLM vision in parallel, then compare results.
-
-    This function runs OCR and LLM vision parsing in parallel for better performance
-    and more accurate results. The LLM analyzes the image directly instead of
-    relying on OCR text.
+async def process_invoice(invoice_id: int, db: AsyncSession, processing_mode: str = "ocr_and_llm") -> bool:
+    """Process an invoice: run OCR and/or LLM vision, then compare results.
 
     Args:
         invoice_id: ID of the invoice to process
         db: Database session
+        processing_mode: One of 'ocr_only', 'llm_only', 'ocr_and_llm'
 
     Returns:
         True if processing succeeded, False otherwise
@@ -159,21 +157,51 @@ async def process_invoice(invoice_id: int, db: AsyncSession) -> bool:
         await db.execute(delete(OcrResult).where(OcrResult.invoice_id == invoice_id))
         logger.info(f"Cleared existing processing results for invoice {invoice_id}")
 
-        # Run OCR and LLM vision in PARALLEL using separate thread pools
+        # Run OCR and/or LLM based on processing_mode
         loop = asyncio.get_running_loop()
 
-        # Create tasks for parallel execution
-        # OCR uses CPU-bound pool, LLM uses I/O-bound pool
-        ocr_task = loop.run_in_executor(
-            _ocr_executor, _run_ocr, invoice.file_data, invoice.file_type
-        )
-        llm_task = loop.run_in_executor(
-            _llm_executor, _run_llm_vision, invoice.file_data, invoice.file_type
-        )
+        # If llm_only is requested but the current LLM doesn't support vision,
+        # automatically fall back to ocr_and_llm to avoid empty results
+        effective_mode = processing_mode
+        if processing_mode == "llm_only":
+            llm_svc = get_llm_service()
+            if not llm_svc.is_available or not llm_svc.supports_vision():
+                effective_mode = "ocr_and_llm"
+                logger.warning(
+                    f"Invoice {invoice_id}: 'llm_only' requested but LLM does not support vision "
+                    f"— falling back to 'ocr_and_llm'"
+                )
 
-        # Wait for both tasks to complete
-        logger.info(f"Running OCR and LLM vision in parallel for invoice {invoice_id}")
-        ocr_result_data, llm_fields = await asyncio.gather(ocr_task, llm_task)
+        use_ocr = effective_mode != "llm_only"
+        use_llm = effective_mode != "ocr_only"
+        logger.info(f"Processing invoice {invoice_id} with mode={effective_mode} (requested={processing_mode})")
+
+        if use_ocr and use_llm:
+            ocr_task = loop.run_in_executor(_ocr_executor, _run_ocr, invoice.file_data, invoice.file_type)
+            llm_task = loop.run_in_executor(_llm_executor, _run_llm_vision, invoice.file_data, invoice.file_type)
+            ocr_result_data, llm_fields = await asyncio.gather(ocr_task, llm_task)
+        elif use_ocr:
+            # OCR-only mode: run OCR first, then auto-fallback to LLM if critical fields are missing
+            ocr_result_data = await loop.run_in_executor(_ocr_executor, _run_ocr, invoice.file_data, invoice.file_type)
+            _, _, _ocr_fields_peek = ocr_result_data
+            _critical = ['invoice_number', 'issue_date', 'total_with_tax']
+            _missing = [f for f in _critical if not _ocr_fields_peek.get(f)]
+            if _missing:
+                _llm_svc = get_llm_service()
+                if _llm_svc.is_available and _llm_svc.supports_vision():
+                    logger.info(
+                        f"Invoice {invoice_id}: OCR missing {_missing}, running LLM fallback"
+                    )
+                    llm_fields = await loop.run_in_executor(
+                        _llm_executor, _run_llm_vision, invoice.file_data, invoice.file_type
+                    )
+                else:
+                    llm_fields = {}
+            else:
+                llm_fields = {}
+        else:  # llm_only
+            ocr_result_data = ("", 0.0, {})
+            llm_fields = await loop.run_in_executor(_llm_executor, _run_llm_vision, invoice.file_data, invoice.file_type)
 
         # Unpack OCR results
         raw_text, confidence, ocr_fields = ocr_result_data
@@ -312,10 +340,10 @@ def _compare_and_resolve(
             source = 'matched'
             needs_review = False
         elif ocr_value and llm_value:
-            # Both have values but they differ - needs manual review
-            final_value = None  # Leave blank for manual review
-            source = 'conflict'
-            needs_review = True
+            # Both have values but differ — prefer LLM, no manual review needed
+            final_value = llm_value
+            source = 'llm'
+            needs_review = False
         elif llm_value and not ocr_value:
             # LLM found something OCR missed - prefer LLM
             final_value = llm_value
@@ -340,7 +368,46 @@ def _compare_and_resolve(
                 'needs_review': needs_review,
             })
 
+    # Post-process: sanitize invoice_number
+    if final_fields.get('invoice_number'):
+        final_fields['invoice_number'] = _sanitize_invoice_number(final_fields['invoice_number'])
+
     return final_fields, diffs
+
+
+def _sanitize_invoice_number(raw: Optional[str]) -> Optional[str]:
+    """Sanitize invoice number: keep only digits, prefer 20-digit electronic format.
+
+    Chinese electronic invoices use a 20-digit all-numeric code.
+    Traditional paper invoices use 8 or 10 digits.
+    This function strips non-digit characters, then:
+      - If result is exactly 20 digits -> return as-is (e-invoice)
+      - If result is 8 or 10 digits -> return as-is (paper invoice)
+      - If result is longer than 20 digits -> try to extract the first 20-digit run
+      - Otherwise return the cleaned digits if non-empty
+    """
+    if not raw:
+        return None
+    # Remove spaces, dashes, Chinese full-width chars, and any non-digit noise
+    digits_only = re.sub(r'[^0-9]', '', raw)
+    if not digits_only:
+        return None
+    # Perfect 20-digit e-invoice number
+    if len(digits_only) == 20:
+        return digits_only
+    # Perfect 8/10-digit paper invoice number
+    if len(digits_only) in (8, 10):
+        return digits_only
+    # Try to find a 20-digit run in the original (OCR may add stray chars)
+    match = re.search(r'\d{20}', raw)
+    if match:
+        return match.group(0)
+    # Try 10-digit run
+    match = re.search(r'\d{10}', raw)
+    if match:
+        return match.group(0)
+    # Fall back to whatever digits we have
+    return digits_only if len(digits_only) >= 6 else None
 
 
 def _normalize_value(value: Any) -> Optional[str]:

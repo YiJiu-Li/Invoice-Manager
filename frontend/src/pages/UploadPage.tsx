@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Upload, message, List, Tag } from 'antd';
-import { UploadOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
+import { Upload, message, List, Tag, Radio, Tooltip } from 'antd';
+import { UploadOutlined, CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined } from '@ant-design/icons';
 import type { UploadFile } from 'antd/es/upload/interface';
-import { uploadInvoices } from '../services/api';
-import type { UploadResponse } from '../types/invoice';
+import { uploadInvoices, getLLMStatus } from '../services/api';
+import type { UploadResponse, LLMStatusResponse } from '../types/invoice';
 import styles from './UploadPage.module.css';
 
 const { Dragger } = Upload;
@@ -13,7 +13,25 @@ function UploadPage() {
   const navigate = useNavigate();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [processingMode, setProcessingMode] = useState<string>('ocr_only');
+  const [llmStatus, setLlmStatus] = useState<LLMStatusResponse | null>(null);
+
+  useEffect(() => {
+    getLLMStatus().then(setLlmStatus).catch(() => {});
+  }, []);
   const [results, setResults] = useState<UploadResponse[]>([]);
+  const [countdown, setCountdown] = useState<number | null>(null);
+
+  // Auto-navigate to list after successful upload
+  useEffect(() => {
+    if (countdown === null) return;
+    if (countdown <= 0) {
+      navigate('/');
+      return;
+    }
+    const timer = setTimeout(() => setCountdown((c) => (c !== null ? c - 1 : null)), 1000);
+    return () => clearTimeout(timer);
+  }, [countdown, navigate]);
 
   const handleUpload = async () => {
     if (fileList.length === 0) {
@@ -24,13 +42,14 @@ function UploadPage() {
     setUploading(true);
     try {
       const files = fileList.map((f) => f.originFileObj as File);
-      const response = await uploadInvoices(files);
+      const response = await uploadInvoices(files, processingMode);
       setResults(response);
 
       const successCount = response.filter((r) => r.status === 'success').length;
       if (successCount > 0) {
         message.success(`成功上传 ${successCount} 个文件`);
         setFileList([]);
+        setCountdown(5); // auto navigate in 5s
       }
 
       const failCount = response.filter((r) => r.status === 'error').length;
@@ -80,6 +99,26 @@ function UploadPage() {
         </header>
 
         <div className={styles.uploadCard}>
+          <div className={styles.modeSelector}>
+            <span className={styles.modeSelectorLabel}>
+              处理模式
+              <Tooltip title="OCR只读取图片文字，无需API费用；LLM视觉简单直接识别，精度更高；OCR+LLM双重校验推荐">
+                <InfoCircleOutlined style={{ marginLeft: 4, color: '#8c8c8c', cursor: 'help' }} />
+              </Tooltip>
+            </span>
+            <Radio.Group
+              value={processingMode}
+              onChange={(e) => setProcessingMode(e.target.value)}
+              optionType="button"
+              buttonStyle="solid"
+            >
+              <Radio.Button value="ocr_only">OCR 优先（智能补全）</Radio.Button>
+              <Radio.Button value="ocr_and_llm">OCR + LLM（全量）</Radio.Button>
+              <Tooltip title={llmStatus && !llmStatus.supports_vision ? '当前 LLM 不支持视觉，选择后将自动降级为 OCR + LLM 模式' : ''}>
+                <Radio.Button value="llm_only">仅 LLM 视觉（高精度）</Radio.Button>
+              </Tooltip>
+            </Radio.Group>
+          </div>
           <div className={styles.uploadDropzone}>
             <Dragger {...uploadProps}>
               <div className="ant-upload-drag-icon">
@@ -140,7 +179,9 @@ function UploadPage() {
               className={styles.viewListButton}
               onClick={() => navigate('/')}
             >
-              查看发票列表
+              {countdown !== null && countdown > 0
+                ? `查看发票列表（${countdown}s 后自动跳转）`
+                : '查看发票列表'}
             </button>
           </div>
         )}

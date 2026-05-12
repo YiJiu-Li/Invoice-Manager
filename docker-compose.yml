@@ -32,7 +32,7 @@ services:
       - ./backend:/app
       - paddleocr_models:/root/.paddleocr
     ports:
-      - "18080:18080"
+      - "18841:18080"
     depends_on:
       db:
         condition: service_healthy
@@ -47,7 +47,7 @@ services:
       - ./frontend:/app
       - /app/node_modules
     ports:
-      - "15173:15173"
+      - "18840:15173"
     depends_on:
       - backend
     environment:

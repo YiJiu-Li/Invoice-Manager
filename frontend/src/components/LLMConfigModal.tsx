@@ -78,8 +78,18 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
       setStatus(data);
       if (data.active_provider) {
         setSelectedProvider(data.active_provider);
-        // Fetch models for the active provider
         await fetchModels(data.active_provider);
+        // Pre-fill form with currently configured values
+        const providerInfo = data.available_providers.find(p => p.name === data.active_provider);
+        form.setFieldsValue({
+          provider: data.active_provider,
+          model: providerInfo?.model || '',
+          base_url: providerInfo?.base_url || '',
+          api_key: '',       // API key is never echoed back for security
+          config_token: '',
+        });
+      } else {
+        form.resetFields();
       }
     } catch (error) {
       console.error('Failed to fetch LLM status:', error);
@@ -113,7 +123,6 @@ function LLMConfigModal({ open, onClose, onConfigured }: LLMConfigModalProps) {
   useEffect(() => {
     if (open) {
       fetchStatus();
-      form.resetFields();
     }
   }, [open]);
 

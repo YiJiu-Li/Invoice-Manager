@@ -98,6 +98,7 @@ class LLMProviderInfo(BaseModel):
 class LLMStatusResponse(BaseModel):
     """Response for LLM status check."""
     is_configured: bool
+    supports_vision: bool = False
     active_provider: Optional[str] = None
     active_provider_display: Optional[str] = None
     configured_providers: List[str] = []
@@ -163,6 +164,7 @@ async def get_llm_status():
 
     return LLMStatusResponse(
         is_configured=settings.is_llm_configured(),
+        supports_vision=llm_service.supports_vision() if llm_service.is_available else False,
         active_provider=active_provider,
         active_provider_display=PROVIDER_DISPLAY_NAMES.get(active_provider, active_provider) if active_provider else None,
         configured_providers=configured_providers,

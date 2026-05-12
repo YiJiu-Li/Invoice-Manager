@@ -18,7 +18,11 @@ RUN for i in 1 2 3 4 5; do \
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir \
+    -i https://mirrors.aliyun.com/pypi/simple/ \
+    --trusted-host mirrors.aliyun.com \
+    --timeout 120 \
+    -r requirements.txt
 
 # Copy application
 COPY . .

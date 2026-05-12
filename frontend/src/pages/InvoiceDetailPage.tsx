@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useLocation } from 'react-router-dom';
 import {
   Descriptions,
   Button,
@@ -14,6 +14,8 @@ import {
 } from 'antd';
 import {
   ArrowLeftOutlined,
+  LeftOutlined,
+  RightOutlined,
   EditOutlined,
   SaveOutlined,
   SyncOutlined,
@@ -22,10 +24,11 @@ import {
   DownloadOutlined,
   ExpandOutlined,
 } from '@ant-design/icons';
-import { getInvoice, getInvoiceFileUrl, updateInvoice, resolveDiff, confirmInvoice, reprocessInvoice } from '../services/api';
+import { getInvoice, fetchInvoiceFileBlob, downloadBlobUrl, updateInvoice, resolveDiff, confirmInvoice, reprocessInvoice, getAdjacentInvoices } from '../services/api';
 import type { InvoiceDetail } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
 import StatusTag from '../components/StatusTag';
+import { useAuth } from '../contexts/AuthContext';
 import styles from './InvoiceDetailPage.module.css';
 
 const fieldLabels: Record<string, string> = {
@@ -49,6 +52,19 @@ const fieldLabels: Record<string, string> = {
 function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const { user: currentUser } = useAuth();
+  const idList: number[] = (location.state as { ids?: number[] } | null)?.ids ?? [];
+  const currentIndex = idList.indexOf(Number(id));
+  const prevIdFromList = currentIndex > 0 ? idList[currentIndex - 1] : null;
+  const nextIdFromList = currentIndex >= 0 && currentIndex < idList.length - 1 ? idList[currentIndex + 1] : null;
+  // When navigating within the list, compute adjacent IDs directly from idList
+  // so they stay correct across same-component re-renders (React doesn't remount on route change).
+  // Fall back to API-fetched adjacent IDs when opened directly without idList.
+  const [adjPrevId, setAdjPrevId] = useState<number | null>(null);
+  const [adjNextId, setAdjNextId] = useState<number | null>(null);
+  const prevId = idList.length > 0 ? prevIdFromList : adjPrevId;
+  const nextId = idList.length > 0 ? nextIdFromList : adjNextId;
   const [loading, setLoading] = useState(true);
   const [reprocessing, setReprocessing] = useState(false);
   const [invoice, setInvoice] = useState<InvoiceDetail | null>(null);
@@ -64,6 +80,7 @@ function InvoiceDetailPage() {
   const [rightPanelWidth, setRightPanelWidth] = useState(420);
   const [isDragging, setIsDragging] = useState(false);
   const [fullscreenPreview, setFullscreenPreview] = useState(false);
+  const [fileBlob, setFileBlob] = useState<{ url: string; filename: string } | null>(null);
   const dragStartX = useRef(0);
   const dragStartWidth = useRef(420);
 
@@ -108,7 +125,33 @@ function InvoiceDetailPage() {
 
   useEffect(() => {
     fetchInvoice();
+    // Fetch adjacent IDs from API only when idList is not available
+    if (idList.length === 0 && id) {
+      getAdjacentInvoices(parseInt(id)).then(({ prev_id, next_id }) => {
+        setAdjPrevId(prev_id);
+        setAdjNextId(next_id);
+      }).catch(() => {/* ignore */});
+    } else {
+      setAdjPrevId(null);
+      setAdjNextId(null);
+    }
   }, [id]);
+
+  // Load file blob with auth header; revoke URL on cleanup
+  useEffect(() => {
+    if (!invoice) return;
+    let blobUrl: string | null = null;
+    fetchInvoiceFileBlob(invoice.id)
+      .then((blob) => {
+        blobUrl = blob.url;
+        setFileBlob(blob);
+      })
+      .catch(() => {/* preview unavailable */});
+    return () => {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      setFileBlob(null);
+    };
+  }, [invoice?.id]);
 
   const handleSave = async () => {
     if (!id || !invoice) return;
@@ -149,14 +192,11 @@ function InvoiceDetailPage() {
         'invoice_number',
         'issue_date',
         'total_with_tax',
-        'buyer_name',
-        'buyer_tax_id',
-        'seller_name',
-        'seller_tax_id',
-        'item_name',
       ];
+      // Read from form (covers edits not yet saved) or fall back to invoice state
+      const formValues = form.getFieldsValue();
       const missing = requiredFields.filter((field) => {
-        const value = invoice[field];
+        const value = formValues[field] ?? invoice[field];
         if (value === null || value === undefined) {
           return true;
         }
@@ -167,7 +207,13 @@ function InvoiceDetailPage() {
       });
 
       if (missing.length > 0) {
-        message.error('请先补全必填字段，再进行确认。');
+        const fieldLabels: Record<string, string> = {
+          invoice_number: '发票号码',
+          issue_date: '开票日期',
+          total_with_tax: '价税合计',
+        };
+        const names = missing.map((f) => fieldLabels[f] ?? f).join('、');
+        message.error(`请先补全必填字段（${names}），再进行确认。`);
         return;
       }
     }
@@ -239,6 +285,23 @@ function InvoiceDetailPage() {
             <ArrowLeftOutlined />
             返回列表
           </button>
+          <Button.Group size="small" style={{ marginLeft: 8 }}>
+              <Button
+                icon={<LeftOutlined />}
+                disabled={prevId === null}
+                onClick={() => prevId !== null && navigate(`/invoices/${prevId}`, { state: { ids: idList } })}
+              >
+                上一张
+              </Button>
+              <Button
+                iconPosition="end"
+                icon={<RightOutlined />}
+                disabled={nextId === null}
+                onClick={() => nextId !== null && navigate(`/invoices/${nextId}`, { state: { ids: idList } })}
+              >
+                下一张
+              </Button>
+            </Button.Group>
           <div className={styles.headerTitle}>
             <div className={styles.invoiceNumber}>
               {invoice.invoice_number || '发票详情'}
@@ -249,9 +312,6 @@ function InvoiceDetailPage() {
           </div>
         </div>
         <div className={styles.headerActions}>
-          <button className={styles.rejectButton} disabled title="功能开发中">
-            拒绝
-          </button>
           <button className={styles.confirmButton} onClick={handleConfirmAll}>
             确认发票
           </button>
@@ -291,12 +351,12 @@ function InvoiceDetailPage() {
                 <Form form={form} layout="vertical">
                   <Row gutter={16}>
                     <Col span={12}>
-                      <Form.Item name="invoice_number" label="发票号码">
+                      <Form.Item name="invoice_number" label="发票号码" required>
                         <Input />
                       </Form.Item>
                     </Col>
                     <Col span={12}>
-                      <Form.Item name="issue_date" label="开票日期">
+                      <Form.Item name="issue_date" label="开票日期" required>
                         <Input />
                       </Form.Item>
                     </Col>
@@ -326,7 +386,7 @@ function InvoiceDetailPage() {
                       </Form.Item>
                     </Col>
                     <Col span={8}>
-                      <Form.Item name="total_with_tax" label="价税合计">
+                      <Form.Item name="total_with_tax" label="价税合计" required>
                         <Input type="number" />
                       </Form.Item>
                     </Col>
@@ -359,10 +419,10 @@ function InvoiceDetailPage() {
                 </Form>
               ) : (
                 <Descriptions column={2} bordered size="small">
-                  <Descriptions.Item label="发票号码">
+                  <Descriptions.Item label={<><span style={{color:'#ff4d4f',marginRight:2}}>*</span>发票号码</>}>
                     {invoice.invoice_number || '-'}
                   </Descriptions.Item>
-                  <Descriptions.Item label="开票日期">
+                  <Descriptions.Item label={<><span style={{color:'#ff4d4f',marginRight:2}}>*</span>开票日期</>}>
                     {invoice.issue_date || '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="购买方名称">
@@ -401,12 +461,17 @@ function InvoiceDetailPage() {
                   <Descriptions.Item label="税额">
                     {invoice.tax_amount != null ? `¥${Number(invoice.tax_amount).toFixed(2)}` : '-'}
                   </Descriptions.Item>
-                  <Descriptions.Item label="价税合计">
+                  <Descriptions.Item label={<><span style={{color:'#ff4d4f',marginRight:2}}>*</span>价税合计</>}>
                     {invoice.total_with_tax != null ? `¥${Number(invoice.total_with_tax).toFixed(2)}` : '-'}
                   </Descriptions.Item>
                   <Descriptions.Item label="归属人">
                     {invoice.owner || '-'}
                   </Descriptions.Item>
+                  {currentUser?.is_admin && (
+                    <Descriptions.Item label="上传者">
+                      {invoice.uploaded_by_display_name || invoice.uploaded_by_username || '-'}
+                    </Descriptions.Item>
+                  )}
                 </Descriptions>
               )}
             </div>
@@ -589,13 +654,14 @@ function InvoiceDetailPage() {
                 >
                   <ExpandOutlined />
                 </button>
-                <a
-                  href={getInvoiceFileUrl(invoice.id, true)}
+                <button
                   className={styles.downloadButton}
+                  onClick={() => fileBlob && downloadBlobUrl(fileBlob.url, fileBlob.filename)}
+                  disabled={!fileBlob}
                 >
                   <DownloadOutlined />
                   下载
-                </a>
+                </button>
               </div>
             </div>
             <div className={styles.previewBody}>
@@ -603,13 +669,13 @@ function InvoiceDetailPage() {
                 {isDragging && <div style={{ position: 'absolute', inset: 0, zIndex: 10 }} />}
                 {invoice.file_type === 'pdf' ? (
                   <iframe
-                    src={getInvoiceFileUrl(invoice.id)}
+                    src={fileBlob?.url || ''}
                     style={{ width: '100%', height: '100%', minHeight: 500, border: 'none', display: 'block' }}
                     title="PDF Preview"
                   />
                 ) : (
                   <img
-                    src={getInvoiceFileUrl(invoice.id)}
+                    src={fileBlob?.url || ''}
                     alt="Invoice"
                     style={{ width: '100%', objectFit: 'contain' }}
                   />
@@ -631,13 +697,13 @@ function InvoiceDetailPage() {
         >
           {invoice.file_type === 'pdf' ? (
             <iframe
-              src={getInvoiceFileUrl(invoice.id)}
+              src={fileBlob?.url || ''}
               style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
               title="PDF Preview Fullscreen"
             />
           ) : (
             <img
-              src={getInvoiceFileUrl(invoice.id)}
+              src={fileBlob?.url || ''}
               alt="Invoice"
               style={{ width: '100%', height: '100%', objectFit: 'contain' }}
             />

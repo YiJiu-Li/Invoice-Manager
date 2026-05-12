@@ -5,7 +5,7 @@
 ### AI-Powered Chinese Invoice Recognition with Dual-Source Verification
 ### AI驱动的中文发票识别系统 · OCR+LLM双源验证
 
-**v0.3.1** | Latest Release: 2026-05-12
+**v0.4.0** | Latest Release: 2026-05-12
 
 > **Fork 说明** | 本仓库由 [YiJiu-Li](https://github.com/YiJiu-Li) 在原项目基础上二次开发，新增查重、PDF预览动态调整等功能。
 > 原项目地址：[stone16/Invoice-Manager](https://github.com/stone16/Invoice-Manager)
@@ -32,29 +32,56 @@
 
 ## ✨ Highlights
 
-- **🔍 Dual-Source Verification** - OCR + LLM double-check every field, conflicts auto-flagged for review
+- **🔍 Dual-Source Verification** - OCR + LLM double-check every field, LLM result preferred on conflict
 - **🤖 Multi-LLM Support** - GPT-4o / Claude / Gemini / Qwen / DeepSeek / Zhipu GLM
-- **🇨🇳 Chinese Invoice Optimized** - PaddleOCR + custom prompts for VAT invoices (增值税发票)
-- **⚡ Parallel Processing** - OCR and LLM run simultaneously for faster results
+- **🇨🇳 Chinese Invoice Optimized** - PaddleOCR PP-OCRv4 + custom prompts for VAT invoices (增值税发票)
+- **⚡ Smart OCR-First Mode** - OCR runs first; LLM fallback only triggered when critical fields are missing
 - **🐳 One-Click Deploy** - Docker Compose, ready in 3 minutes
 - **🔒 Privacy First** - Self-hosted, your data never leaves your server
 - **🔎 Duplicate Detection** - Automatically find duplicate invoices by invoice number or key field combination
 - **📐 Resizable PDF Preview** - Drag to resize preview panel, fullscreen mode for better readability
+- **👤 User & Permission System** - JWT auth, admin/user roles, uploader attribution
 
 ## ✨ 亮点
 
-- **🔍 双源验证** - OCR + LLM 双重识别，字段冲突自动标记待审核
+- **🔍 双源验证** - OCR + LLM 双重识别，冲突时优先采用 LLM 结果
 - **🤖 多模型支持** - 支持 GPT-4o / Claude / Gemini / 通义千问 / DeepSeek / 智谱GLM
-- **🇨🇳 中文发票优化** - PaddleOCR 深度优化 + 增值税发票专用提示词
-- **⚡ 并行处理** - OCR 和 LLM 同时运行，识别更快
+- **🇨🇳 中文发票优化** - PaddleOCR PP-OCRv4 + 增值税发票专用提示词
+- **⚡ OCR优先智能模式** - 默认先跑OCR，仅在关键字段缺失时自动补跑LLM，速度最快
 - **🐳 一键部署** - Docker Compose 启动，3分钟搞定
 - **🔒 数据安全** - 本地私有部署，数据不离开服务器
 - **🔎 发票查重** - 自动检测重复发票，按发票号码或关键字段组合识别
 - **📐 PDF预览增强** - 拖拽调整预览面板宽度，支持全屏查看
+- **👤 用户权限系统** - JWT鉴权，管理员/普通用户角色，上传者归属展示
 
 ---
 
 ## 📦 版本更新 | Changelog
+
+### v0.4.0 (2026-05-12) - 智能识别增强 & 用户系统 | by [YiJiu-Li](https://github.com/YiJiu-Li)
+
+**👤 用户权限系统 | User & Permission System**
+- JWT 登录/注册，管理员与普通用户角色分离
+- 发票列表与详情页展示上传者信息（仅管理员可见）
+- 所有接口鉴权保护
+
+**⚡ OCR优先智能模式 | Smart OCR-First Processing**
+- 新增处理模式选择：OCR优先（智能补全）/ OCR+LLM（全量）/ 仅LLM视觉
+- 默认 OCR 优先：先跑 OCR，仅当发票号码/开票日期/价税合计缺失时自动触发 LLM，兼顾速度与准确率
+- 仅LLM视觉模式下若模型不支持视觉，自动降级为 OCR+LLM
+
+**🔍 识别精度提升 | Accuracy Improvements**
+- PaddleOCR 升级至 PP-OCRv4
+- OCR/LLM 冲突时优先采用 LLM 结果，不再强制人工审核
+- 电子发票号码安全过滤：剔除非数字字符，优先匹配20位电子发票格式
+
+**🎨 UI 优化 | UI Improvements**
+- 发票详情页上/下翻页修复（同路由跳转时按钮状态正确同步）
+- 确认发票必填字段放宽为3项（发票号码、开票日期、价税合计），并显示红色 * 标识
+- 错误提示精确显示缺失的字段名称
+- 移除未实现的「拒绝」按钮
+
+---
 
 ### v0.3.1 (2026-05-12) - 查重 & PDF预览增强 | by [YiJiu-Li](https://github.com/YiJiu-Li)
 

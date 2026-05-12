@@ -37,6 +37,20 @@
   gap: var(--spacing-xl);
 }
 
+.modeSelector {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+  flex-wrap: wrap;
+}
+
+.modeSelectorLabel {
+  font-size: var(--font-size-sm);
+  color: var(--foreground-secondary);
+  white-space: nowrap;
+  font-weight: var(--font-weight-medium);
+}
+
 /* Custom Dragger Styling */
 .uploadDropzone :global(.ant-upload-drag) {
   border: 2px dashed var(--border);

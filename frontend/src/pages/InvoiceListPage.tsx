@@ -14,6 +14,7 @@ import {
   Statistic,
   Row,
   Col,
+  Empty,
 } from 'antd';
 import {
   EyeOutlined,
@@ -23,10 +24,11 @@ import {
   DownloadOutlined,
   SyncOutlined,
   CopyOutlined,
+  CheckOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, getStatistics, checkDuplicates } from '../services/api';
+import { listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, batchConfirmInvoices, getStatistics, checkDuplicates, downloadInvoiceExport } from '../services/api';
 import type { Invoice, Statistics, DuplicateGroup } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
 import ResizableTitle from '../components/ResizableTitle';
@@ -35,6 +37,7 @@ import { useColumnSettings } from '../hooks/useColumnSettings';
 import { useInvoiceStatistics } from '../hooks/useInvoiceStatistics';
 import MetricCard from '../components/dashboard/MetricCard';
 import ControlBar from '../components/dashboard/ControlBar';
+import { useAuth } from '../contexts/AuthContext';
 import styles from './InvoiceListPage.module.css';
 import 'react-resizable/css/styles.css';
 
@@ -50,6 +53,7 @@ const statusColors: Record<string, string> = {
 
 function InvoiceListPage() {
   const navigate = useNavigate();
+  const { user: currentUser } = useAuth();
   const [loading, setLoading] = useState(false);
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [total, setTotal] = useState(0);
@@ -93,7 +97,7 @@ function InvoiceListPage() {
     visibleColumns,
   } = useColumnSettings();
 
-  const fetchInvoices = async () => {
+  const fetchInvoices = async (showError = false) => {
     setLoading(true);
     try {
       const params: Record<string, unknown> = { page, page_size: pageSize };
@@ -101,13 +105,17 @@ function InvoiceListPage() {
       if (ownerFilter) params.owner = ownerFilter;
       if (dateRange?.[0]) params.start_date = dateRange[0].format('YYYY-MM-DD');
       if (dateRange?.[1]) params.end_date = dateRange[1].format('YYYY-MM-DD');
-      if (searchValue) params.invoice_number = searchValue;
+      if (searchValue) params.keyword = searchValue;
 
       const response = await listInvoices(params);
       setInvoices(response.items);
       setTotal(response.total);
     } catch (error) {
-      message.error('获取发票列表失败');
+      setInvoices([]);
+      setTotal(0);
+      if (showError) {
+        message.error('获取发票列表失败');
+      }
       console.error(error);
     } finally {
       setLoading(false);
@@ -131,6 +139,16 @@ function InvoiceListPage() {
   useEffect(() => {
     fetchInvoices();
   }, [page, pageSize, statusFilter, ownerFilter, dateRange, searchValue]);
+
+  // Auto-poll while any invoice is in processing state
+  useEffect(() => {
+    const hasProcessing = invoices.some(
+      (inv) => inv.status === InvoiceStatus.PROCESSING || inv.status === InvoiceStatus.UPLOADED
+    );
+    if (!hasProcessing) return;
+    const timer = setInterval(() => fetchInvoices(), 5000);
+    return () => clearInterval(timer);
+  }, [invoices]);
 
   useEffect(() => {
     fetchStatistics();
@@ -231,6 +249,33 @@ function InvoiceListPage() {
     });
   };
 
+  const handleBatchConfirm = () => {
+    if (selectedRowKeys.length === 0) {
+      message.warning('请先选择发票');
+      return;
+    }
+    Modal.confirm({
+      title: '批量确认发票',
+      content: `确定要确认选中的 ${selectedRowKeys.length} 张发票吗？（仍有未解决差异的发票会失败）`,
+      okText: '确认',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          const result = await batchConfirmInvoices(selectedRowKeys);
+          if (result.failed === 0) {
+            message.success(`成功确认 ${result.success} 张发票`);
+          } else {
+            message.warning(`成功 ${result.success} 张，失败 ${result.failed} 张（可能有未解决的差异）`);
+          }
+          setSelectedRowKeys([]);
+          fetchInvoices();
+        } catch (error) {
+          message.error('批量确认失败');
+        }
+      },
+    });
+  };
+
   const handleExport = (format: 'csv' | 'excel') => {
     const params = new URLSearchParams();
 
@@ -250,8 +295,7 @@ function InvoiceListPage() {
       params.append('end_date', dateRange[1].format('YYYY-MM-DD'));
     }
 
-    const url = `/api/invoices/export/${format}?${params.toString()}`;
-    window.open(url, '_blank');
+    downloadInvoiceExport(format, params).catch(() => message.error('导出失败'));
   };
 
   // All column definitions
@@ -458,6 +502,19 @@ function InvoiceListPage() {
           onResize: handleColumnResize('owner'),
         }),
       },
+      uploaded_by: {
+        title: '上传者',
+        key: 'uploaded_by',
+        width: columnWidths.uploaded_by ?? 120,
+        render: (_: unknown, record: Invoice) => {
+          const name = record.uploaded_by_display_name || record.uploaded_by_username;
+          return name || '-';
+        },
+        onHeaderCell: () => ({
+          width: columnWidths.uploaded_by ?? 120,
+          onResize: handleColumnResize('uploaded_by'),
+        }),
+      },
       file_name: {
         title: '文件名',
         dataIndex: 'file_name',
@@ -502,7 +559,7 @@ function InvoiceListPage() {
             <Button
               type="link"
               icon={<EyeOutlined />}
-              onClick={() => navigate(`/invoices/${record.id}`)}
+            onClick={() => navigate(`/invoices/${record.id}`, { state: { ids: invoices.map((i) => i.id) } })}
             >
               详情
             </Button>
@@ -522,11 +579,13 @@ function InvoiceListPage() {
   );
 
   // Build columns based on visible column configs
+  // Admin-only columns: 'uploaded_by'
   const columns: ColumnsType<Invoice> = useMemo(() => {
     return visibleColumns
+      .filter((config) => config.key !== 'uploaded_by' || !!currentUser?.is_admin)
       .map((config) => allColumnDefinitions[config.key])
       .filter(Boolean);
-  }, [visibleColumns, allColumnDefinitions]);
+  }, [visibleColumns, allColumnDefinitions, currentUser?.is_admin]);
 
   // Calculate total scroll width
   const scrollX = useMemo(() => {
@@ -656,7 +715,7 @@ function InvoiceListPage() {
 
       {/* Control Bar */}
       <ControlBar
-        searchPlaceholder="搜索发票号码..."
+        searchPlaceholder="搜索发票号/购买方/销售方..."
         searchValue={searchValue}
         onSearchChange={handleSearchChange}
         statusFilter={statusFilter}
@@ -674,10 +733,10 @@ function InvoiceListPage() {
           style={{ width: 120 }}
           value={ownerFilter}
           onChange={(e) => handleOwnerChange(e.target.value)}
-          onPressEnter={fetchInvoices}
+          onPressEnter={() => fetchInvoices(true)}
         />
 
-        <Button icon={<ReloadOutlined />} onClick={fetchInvoices}>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchInvoices(true)}>
           刷新
         </Button>
 
@@ -700,6 +759,12 @@ function InvoiceListPage() {
               onClick={handleBatchReprocess}
             >
               重新解析
+            </Button>
+            <Button
+              icon={<CheckOutlined />}
+              onClick={handleBatchConfirm}
+            >
+              批量确认
             </Button>
             <Button
               danger
@@ -726,6 +791,21 @@ function InvoiceListPage() {
           rowSelection={{
             selectedRowKeys,
             onChange: (keys) => setSelectedRowKeys(keys as number[]),
+          }}
+          locale={{
+            emptyText: (
+              <Empty
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+                description={
+                  <span>
+                    暂无发票数据，
+                    <Button type="link" style={{ padding: 0 }} onClick={() => navigate('/upload')}>
+                      立即上传
+                    </Button>
+                  </span>
+                }
+              />
+            ),
           }}
           pagination={false}
           scroll={{ x: scrollX }}

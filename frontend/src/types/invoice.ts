@@ -29,6 +29,9 @@ export interface Invoice {
   tax_amount: number | null;
   status: InvoiceStatus;
   owner: string | null;
+  uploaded_by_id: number | null;
+  uploaded_by_username: string | null;
+  uploaded_by_display_name: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -137,6 +140,7 @@ export interface LLMProviderInfo {
 
 export interface LLMStatusResponse {
   is_configured: boolean;
+  supports_vision: boolean;
   active_provider: string | null;
   active_provider_display: string | null;
   configured_providers: string[];

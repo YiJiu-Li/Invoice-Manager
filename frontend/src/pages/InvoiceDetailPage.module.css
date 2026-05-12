@@ -424,6 +424,11 @@
   outline-offset: 2px;
 }
 
+.downloadButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .previewBody {
   padding: var(--spacing-lg);
   overflow: auto;

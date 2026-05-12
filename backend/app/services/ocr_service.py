@@ -40,6 +40,7 @@ class OCRService:
                     self._ocr = PaddleOCR(
                         use_angle_cls=True,
                         lang='ch',
+                        ocr_version='PP-OCRv4',
                     )
                     logger.info("PaddleOCR initialized successfully")
         return self._ocr

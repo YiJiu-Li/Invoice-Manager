@@ -1,7 +1,7 @@
 from typing import Optional, List
 from io import BytesIO
 from datetime import date
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, BackgroundTasks, Request
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, Query, BackgroundTasks, Request, Form
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -9,6 +9,7 @@ from decimal import Decimal
 
 from app.database import get_db
 from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, InvoiceStatus
+from app.models.user import User as UserModel
 from app.schemas.invoice import (
     InvoiceResponse, InvoiceListResponse, InvoiceDetailResponse,
     InvoiceUpdate, BatchUpdateRequest, BatchDeleteRequest, StatisticsResponse, UploadResponse,
@@ -17,6 +18,8 @@ from app.schemas.invoice import (
 from app.config import get_settings
 from app.services.audit_service import log_audit_no_commit, get_client_info
 from app.rate_limit import limiter
+from app.auth import get_current_user
+from app.models.user import User
 
 settings = get_settings()
 router = APIRouter()
@@ -48,12 +51,27 @@ def _parse_date_param(value: Optional[str], field_name: str) -> Optional[date]:
         raise HTTPException(status_code=400, detail=f"{field_name} 日期格式无效，应为 YYYY-MM-DD") from exc
 
 
+def _apply_user_filter(query, current_user: User):
+    """非管理员只能查看自己上传的发票"""
+    if not current_user.is_admin:
+        query = query.where(Invoice.uploaded_by_id == current_user.id)
+    return query
+
+
+def _check_invoice_access(invoice: Invoice, current_user: User):
+    """非管理员只能操作自己上传的发票"""
+    if not current_user.is_admin and invoice.uploaded_by_id != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问此发票")
+
+
 @router.post("/upload", response_model=List[UploadResponse])
 @limiter.limit("10/minute")
 async def upload_invoices(
     request: Request,
     background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
+    processing_mode: str = Form("ocr_and_llm"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """上传发票文件 (支持多文件)，上传后异步触发OCR解析"""
@@ -91,7 +109,8 @@ async def upload_invoices(
             file_name=file.filename or "unknown",
             file_type=ext,
             file_data=content,
-            status=InvoiceStatus.UPLOADED
+            status=InvoiceStatus.UPLOADED,
+            uploaded_by_id=current_user.id,
         )
         db.add(invoice)
         await db.flush()
@@ -120,12 +139,12 @@ async def upload_invoices(
 
     # Schedule background processing for each uploaded invoice
     for invoice_id in invoice_ids_to_process:
-        background_tasks.add_task(process_invoice_background, invoice_id)
+        background_tasks.add_task(process_invoice_background, invoice_id, processing_mode)
 
     return results
 
 
-async def process_invoice_background(invoice_id: int, max_retries: int = 3):
+async def process_invoice_background(invoice_id: int, processing_mode: str = "ocr_and_llm", max_retries: int = 3):
     """Background task to process an invoice with OCR/LLM.
 
     Implements exponential backoff retry logic for transient failures.
@@ -134,6 +153,7 @@ async def process_invoice_background(invoice_id: int, max_retries: int = 3):
 
     Args:
         invoice_id: ID of the invoice to process
+        processing_mode: One of 'ocr_only', 'llm_only', 'ocr_and_llm'
         max_retries: Maximum number of retries after the initial attempt (default: 3,
             resulting in up to 4 total attempts)
     """
@@ -162,8 +182,8 @@ async def process_invoice_background(invoice_id: int, max_retries: int = 3):
                 invoice.status = InvoiceStatus.PROCESSING
                 await db.commit()
 
-                logger.info(f"Background processing invoice {invoice_id} (attempt {retry_count + 1}/{max_retries + 1})")
-                success = await do_process(invoice_id, db)
+                logger.info(f"Background processing invoice {invoice_id} mode={processing_mode} (attempt {retry_count + 1}/{max_retries + 1})")
+                success = await do_process(invoice_id, db, processing_mode)
 
                 if success:
                     logger.info(f"Invoice {invoice_id} processing completed successfully")
@@ -227,10 +247,14 @@ async def list_invoices(
     owner: Optional[str] = Query(None, description="归属人筛选"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
+    invoice_number: Optional[str] = Query(None, description="发票号码（模糊）"),
+    keyword: Optional[str] = Query(None, description="关键词（发票号/购买方/销售方）"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """获取发票列表"""
     query = select(Invoice)
+    query = _apply_user_filter(query, current_user)
 
     # Apply filters
     if status:
@@ -249,6 +273,15 @@ async def list_invoices(
             query = query.where(Invoice.issue_date <= end_date_obj)
         except ValueError:
             pass  # Invalid date format, skip filter
+    if invoice_number:
+        query = query.where(Invoice.invoice_number.ilike(f"%{invoice_number}%"))
+    if keyword:
+        from sqlalchemy import or_
+        query = query.where(or_(
+            Invoice.invoice_number.ilike(f"%{keyword}%"),
+            Invoice.buyer_name.ilike(f"%{keyword}%"),
+            Invoice.seller_name.ilike(f"%{keyword}%"),
+        ))
 
     # Count total
     count_query = select(func.count()).select_from(query.subquery())
@@ -261,8 +294,24 @@ async def list_invoices(
     result = await db.execute(query)
     invoices = result.scalars().all()
 
+    # Batch-load uploaders to avoid N+1
+    uploader_ids = {inv.uploaded_by_id for inv in invoices if inv.uploaded_by_id}
+    uploaders: dict[int, UserModel] = {}
+    if uploader_ids:
+        u_result = await db.execute(select(UserModel).where(UserModel.id.in_(uploader_ids)))
+        for u in u_result.scalars().all():
+            uploaders[u.id] = u
+
+    def _enrich(inv: Invoice) -> InvoiceResponse:
+        resp = InvoiceResponse.model_validate(inv)
+        if inv.uploaded_by_id and inv.uploaded_by_id in uploaders:
+            u = uploaders[inv.uploaded_by_id]
+            resp.uploaded_by_username = u.username
+            resp.uploaded_by_display_name = u.display_name
+        return resp
+
     return InvoiceListResponse(
-        items=[InvoiceResponse.model_validate(inv) for inv in invoices],
+        items=[_enrich(inv) for inv in invoices],
         total=total,
         page=page,
         page_size=page_size
@@ -274,10 +323,12 @@ async def get_statistics(
     invoice_ids: Optional[str] = Query(None, description="发票ID列表，逗号分隔"),
     status: Optional[InvoiceStatus] = Query(None, description="状态筛选"),
     owner: Optional[str] = Query(None, description="归属人筛选"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """获取发票统计数据"""
     query = select(Invoice)
+    query = _apply_user_filter(query, current_user)
 
     ids = _parse_invoice_ids(invoice_ids)
     if ids:
@@ -305,6 +356,7 @@ async def get_statistics(
 
 @router.get("/duplicates", response_model=DuplicateCheckResponse)
 async def check_duplicates(
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """查重：检测系统中存在的重复发票。
@@ -313,7 +365,7 @@ async def check_duplicates(
     """
     from collections import defaultdict
 
-    result = await db.execute(select(Invoice).order_by(Invoice.id))
+    result = await db.execute(_apply_user_filter(select(Invoice), current_user).order_by(Invoice.id))
     all_invoices = result.scalars().all()
 
     groups: list[DuplicateGroup] = []
@@ -366,9 +418,36 @@ async def check_duplicates(
     )
 
 
+@router.get("/{invoice_id}/adjacent")
+async def get_adjacent_invoices(
+    invoice_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取相邻发票 ID（按 created_at 排序）"""
+    prev_query = (
+        _apply_user_filter(select(Invoice.id), current_user)
+        .where(Invoice.id < invoice_id)
+        .order_by(Invoice.id.desc())
+        .limit(1)
+    )
+    next_query = (
+        _apply_user_filter(select(Invoice.id), current_user)
+        .where(Invoice.id > invoice_id)
+        .order_by(Invoice.id.asc())
+        .limit(1)
+    )
+    prev_result = await db.execute(prev_query)
+    next_result = await db.execute(next_query)
+    prev_id = prev_result.scalar_one_or_none()
+    next_id = next_result.scalar_one_or_none()
+    return {"prev_id": prev_id, "next_id": next_id}
+
+
 @router.get("/{invoice_id}", response_model=InvoiceDetailResponse)
 async def get_invoice(
     invoice_id: int,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """获取发票详情"""
@@ -378,6 +457,8 @@ async def get_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+
+    _check_invoice_access(invoice, current_user)
 
     # Load related data
     ocr_query = select(OcrResult).where(OcrResult.invoice_id == invoice_id)
@@ -399,6 +480,7 @@ async def get_invoice(
         "file_type": invoice.file_type,
         "status": invoice.status,
         "owner": invoice.owner,
+        "uploaded_by_id": invoice.uploaded_by_id,
         "invoice_number": invoice.invoice_number,
         "issue_date": invoice.issue_date,
         "buyer_name": invoice.buyer_name,
@@ -421,6 +503,14 @@ async def get_invoice(
         "parsing_diffs": list(diffs),
     }
 
+    # Fill uploader info
+    if invoice.uploaded_by_id:
+        u_result = await db.execute(select(UserModel).where(UserModel.id == invoice.uploaded_by_id))
+        uploader = u_result.scalar_one_or_none()
+        if uploader:
+            invoice_dict["uploaded_by_username"] = uploader.username
+            invoice_dict["uploaded_by_display_name"] = uploader.display_name
+
     return InvoiceDetailResponse.model_validate(invoice_dict)
 
 
@@ -428,6 +518,7 @@ async def get_invoice(
 async def get_invoice_file(
     invoice_id: int,
     download: bool = False,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """获取发票原始文件，download=true 时触发下载，否则内联显示"""
@@ -440,6 +531,8 @@ async def get_invoice_file(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+
+    _check_invoice_access(invoice, current_user)
 
     content_type_map = {
         "pdf": "application/pdf",
@@ -464,6 +557,7 @@ async def update_invoice(
     invoice_id: int,
     update_data: InvoiceUpdate,
     request: Request,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """更新发票信息"""
@@ -473,6 +567,8 @@ async def update_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+
+    _check_invoice_access(invoice, current_user)
 
     # Capture old values for audit
     update_dict = update_data.model_dump(exclude_unset=True)
@@ -522,10 +618,11 @@ async def update_invoice(
 async def batch_update_invoices(
     request: Request,
     batch_request: BatchUpdateRequest,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """批量更新发票状态/归属人"""
-    query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
+    query = _apply_user_filter(select(Invoice), current_user).where(Invoice.id.in_(batch_request.invoice_ids))
     result = await db.execute(query)
     invoices = result.scalars().all()
 
@@ -569,6 +666,7 @@ async def batch_update_invoices(
 async def batch_delete_invoices(
     request: Request,
     batch_request: BatchDeleteRequest,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """批量删除发票及其关联数据"""
@@ -576,7 +674,7 @@ async def batch_delete_invoices(
         raise HTTPException(status_code=400, detail="请选择要删除的发票")
 
     # Query invoices to delete
-    query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
+    query = _apply_user_filter(select(Invoice), current_user).where(Invoice.id.in_(batch_request.invoice_ids))
     result = await db.execute(query)
     invoices = result.scalars().all()
 
@@ -613,6 +711,7 @@ async def batch_reprocess_invoices(
     request: Request,
     background_tasks: BackgroundTasks,
     batch_request: BatchDeleteRequest,  # Reuse for invoice_ids
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """批量重新解析发票（清除旧的OCR/LLM结果，重新处理）"""
@@ -623,7 +722,7 @@ async def batch_reprocess_invoices(
         raise HTTPException(status_code=400, detail="请选择要重新解析的发票")
 
     # Query invoices to reprocess
-    query = select(Invoice).where(Invoice.id.in_(batch_request.invoice_ids))
+    query = _apply_user_filter(select(Invoice), current_user).where(Invoice.id.in_(batch_request.invoice_ids))
     result = await db.execute(query)
     invoices = result.scalars().all()
 
@@ -669,7 +768,7 @@ async def batch_reprocess_invoices(
 
     # Schedule background processing
     for invoice in invoices:
-        background_tasks.add_task(process_invoice_background, invoice.id)
+        background_tasks.add_task(process_invoice_background, invoice.id, "ocr_and_llm")
 
     return {
         "message": f"已清除 {len(invoices)} 张发票的旧解析结果，正在重新解析",
@@ -680,6 +779,8 @@ async def batch_reprocess_invoices(
 @router.post("/{invoice_id}/process")
 async def process_invoice(
     invoice_id: int,
+    processing_mode: str = Query("ocr_and_llm", description="处理模式: ocr_only / llm_only / ocr_and_llm"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """处理发票：运行OCR解析"""
@@ -692,7 +793,9 @@ async def process_invoice(
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
 
-    success = await do_process(invoice_id, db)
+    _check_invoice_access(invoice, current_user)
+
+    success = await do_process(invoice_id, db, processing_mode)
 
     if success:
         return {"message": "解析成功", "invoice_id": invoice_id}
@@ -704,6 +807,7 @@ async def process_invoice(
 async def delete_invoice(
     invoice_id: int,
     request: Request,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """删除发票"""
@@ -713,6 +817,8 @@ async def delete_invoice(
 
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
+
+    _check_invoice_access(invoice, current_user)
 
     # Audit log
     client_info = get_client_info(request)
@@ -738,11 +844,19 @@ async def resolve_diff(
     diff_id: int,
     resolve_request: ResolveDiffRequest,
     request: Request,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """解决解析差异，选择OCR、LLM或自定义值"""
     from datetime import datetime
     from decimal import Decimal as Dec
+
+    # Verify invoice ownership
+    inv_check_result = await db.execute(select(Invoice).where(Invoice.id == invoice_id))
+    inv_for_check = inv_check_result.scalar_one_or_none()
+    if not inv_for_check:
+        raise HTTPException(status_code=404, detail="发票不存在")
+    _check_invoice_access(inv_for_check, current_user)
 
     # Get the diff
     diff_query = select(ParsingDiff).where(
@@ -844,6 +958,7 @@ async def resolve_diff(
 async def confirm_invoice(
     invoice_id: int,
     request: Request,
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """确认发票，标记所有差异为已解决。"""
@@ -855,21 +970,24 @@ async def confirm_invoice(
     if not invoice:
         raise HTTPException(status_code=404, detail="发票不存在")
 
+    _check_invoice_access(invoice, current_user)
+
     critical_fields = [
         "invoice_number",
         "issue_date",
         "total_with_tax",
-        "buyer_name",
-        "buyer_tax_id",
-        "seller_name",
-        "seller_tax_id",
-        "item_name",
     ]
+    field_labels = {
+        "invoice_number": "发票号码",
+        "issue_date": "开票日期",
+        "total_with_tax": "价税合计",
+    }
     missing_fields = [field for field in critical_fields if not getattr(invoice, field)]
     if missing_fields:
+        names = "、".join(field_labels.get(f, f) for f in missing_fields)
         raise HTTPException(
             status_code=400,
-            detail="无法确认：必填字段缺失，请补全后再确认。"
+            detail=f"无法确认：必填字段（{names}）缺失，请补全后再确认。"
         )
 
     # Check if LLM result exists
@@ -932,6 +1050,7 @@ async def export_invoices_csv(
     owner: Optional[str] = Query(None, description="归属人筛选"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """导出发票为CSV格式"""
@@ -939,6 +1058,7 @@ async def export_invoices_csv(
     from urllib.parse import quote
 
     query = select(Invoice)
+    query = _apply_user_filter(query, current_user)
 
     ids = _parse_invoice_ids(invoice_ids)
     if ids:
@@ -1015,6 +1135,7 @@ async def export_invoices_excel(
     owner: Optional[str] = Query(None, description="归属人筛选"),
     start_date: Optional[str] = Query(None, description="开始日期"),
     end_date: Optional[str] = Query(None, description="结束日期"),
+    current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """导出发票为Excel格式"""
@@ -1027,6 +1148,7 @@ async def export_invoices_excel(
         raise HTTPException(status_code=500, detail="Excel导出需要安装openpyxl库")
 
     query = select(Invoice)
+    query = _apply_user_filter(query, current_user)
 
     ids = _parse_invoice_ids(invoice_ids)
     if ids:

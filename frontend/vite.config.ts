@@ -17,6 +17,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '0.0.0.0',
       port: 15173,
+      allowedHosts: ['310007.xyz', '.310007.xyz'],
       proxy: {
         '/api': {
           target: apiTarget,

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import {
   Descriptions,
@@ -20,6 +20,7 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   DownloadOutlined,
+  ExpandOutlined,
 } from '@ant-design/icons';
 import { getInvoice, getInvoiceFileUrl, updateInvoice, resolveDiff, confirmInvoice, reprocessInvoice } from '../services/api';
 import type { InvoiceDetail } from '../types/invoice';
@@ -60,6 +61,34 @@ function InvoiceDetailPage() {
     fieldName: '',
   });
   const [customValue, setCustomValue] = useState('');
+  const [rightPanelWidth, setRightPanelWidth] = useState(420);
+  const [isDragging, setIsDragging] = useState(false);
+  const [fullscreenPreview, setFullscreenPreview] = useState(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(420);
+
+  const handleResizerMouseDown = useCallback((e: React.MouseEvent) => {
+    setIsDragging(true);
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = rightPanelWidth;
+    e.preventDefault();
+  }, [rightPanelWidth]);
+
+  useEffect(() => {
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      const delta = dragStartX.current - e.clientX;
+      const newWidth = Math.max(300, Math.min(900, dragStartWidth.current + delta));
+      setRightPanelWidth(newWidth);
+    };
+    const handleMouseUp = () => setIsDragging(false);
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging]);
 
   const fetchInvoice = async () => {
     if (!id) return;
@@ -541,15 +570,27 @@ function InvoiceDetailPage() {
           </Modal>
         </div>
 
+        {/* Drag Resizer */}
+        <div
+          className={`${styles.resizer} ${isDragging ? styles.resizerActive : ''}`}
+          onMouseDown={handleResizerMouseDown}
+        />
+
         {/* Right Panel - PDF Preview */}
-        <div className={styles.rightPanel}>
+        <div className={styles.rightPanel} style={{ width: rightPanelWidth, flexShrink: 0 }}>
           <div className={styles.previewCard}>
             <div className={styles.previewHeader}>
               <span className={styles.previewTitle}>原始文件</span>
               <div className={styles.previewControls}>
+                <button
+                  className={styles.iconButton}
+                  onClick={() => setFullscreenPreview(true)}
+                  title="全屏预览"
+                >
+                  <ExpandOutlined />
+                </button>
                 <a
-                  href={getInvoiceFileUrl(invoice.id)}
-                  download
+                  href={getInvoiceFileUrl(invoice.id, true)}
                   className={styles.downloadButton}
                 >
                   <DownloadOutlined />
@@ -559,23 +600,49 @@ function InvoiceDetailPage() {
             </div>
             <div className={styles.previewBody}>
               <div className={styles.previewContent}>
+                {isDragging && <div style={{ position: 'absolute', inset: 0, zIndex: 10 }} />}
                 {invoice.file_type === 'pdf' ? (
                   <iframe
                     src={getInvoiceFileUrl(invoice.id)}
-                    style={{ width: '100%', height: 600, border: 'none' }}
+                    style={{ width: '100%', height: '100%', minHeight: 500, border: 'none', display: 'block' }}
                     title="PDF Preview"
                   />
                 ) : (
                   <img
                     src={getInvoiceFileUrl(invoice.id)}
                     alt="Invoice"
-                    style={{ width: '100%', maxHeight: 600, objectFit: 'contain' }}
+                    style={{ width: '100%', objectFit: 'contain' }}
                   />
                 )}
               </div>
             </div>
           </div>
         </div>
+
+        {/* Fullscreen Preview Modal */}
+        <Modal
+          open={fullscreenPreview}
+          onCancel={() => setFullscreenPreview(false)}
+          footer={null}
+          width="92vw"
+          style={{ top: 20 }}
+          styles={{ body: { padding: 0, height: 'calc(90vh - 55px)' } }}
+          title={invoice.filename || '文件预览'}
+        >
+          {invoice.file_type === 'pdf' ? (
+            <iframe
+              src={getInvoiceFileUrl(invoice.id)}
+              style={{ width: '100%', height: '100%', border: 'none', display: 'block' }}
+              title="PDF Preview Fullscreen"
+            />
+          ) : (
+            <img
+              src={getInvoiceFileUrl(invoice.id)}
+              alt="Invoice"
+              style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            />
+          )}
+        </Modal>
       </div>
     </div>
   );

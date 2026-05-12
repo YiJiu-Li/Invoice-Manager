@@ -12,7 +12,7 @@ from app.models.invoice import Invoice, OcrResult, LlmResult, ParsingDiff, Invoi
 from app.schemas.invoice import (
     InvoiceResponse, InvoiceListResponse, InvoiceDetailResponse,
     InvoiceUpdate, BatchUpdateRequest, BatchDeleteRequest, StatisticsResponse, UploadResponse,
-    ResolveDiffRequest
+    ResolveDiffRequest, DuplicateGroup, DuplicateCheckResponse
 )
 from app.config import get_settings
 from app.services.audit_service import log_audit_no_commit, get_client_info
@@ -303,6 +303,69 @@ async def get_statistics(
     )
 
 
+@router.get("/duplicates", response_model=DuplicateCheckResponse)
+async def check_duplicates(
+    db: AsyncSession = Depends(get_db)
+):
+    """查重：检测系统中存在的重复发票。
+    
+    优先按发票号码检测，其次按(销售方税号+购买方税号+开票日期+价税合计)组合检测。
+    """
+    from collections import defaultdict
+
+    result = await db.execute(select(Invoice).order_by(Invoice.id))
+    all_invoices = result.scalars().all()
+
+    groups: list[DuplicateGroup] = []
+    already_grouped_ids: set[int] = set()
+
+    # --- Pass 1: group by invoice_number ---
+    by_number: dict[str, list[Invoice]] = defaultdict(list)
+    for inv in all_invoices:
+        if inv.invoice_number and inv.invoice_number.strip():
+            by_number[inv.invoice_number.strip()].append(inv)
+
+    for number, invs in by_number.items():
+        if len(invs) >= 2:
+            groups.append(DuplicateGroup(
+                reason="发票号码相同",
+                duplicate_key=number,
+                invoices=[InvoiceResponse.model_validate(inv) for inv in invs],
+            ))
+            for inv in invs:
+                already_grouped_ids.add(inv.id)
+
+    # --- Pass 2: group by (seller_tax_id, buyer_tax_id, issue_date, total_with_tax) ---
+    by_fields: dict[tuple, list[Invoice]] = defaultdict(list)
+    for inv in all_invoices:
+        if inv.id in already_grouped_ids:
+            continue
+        if inv.seller_tax_id and inv.buyer_tax_id and inv.issue_date and inv.total_with_tax is not None:
+            key = (
+                inv.seller_tax_id.strip(),
+                inv.buyer_tax_id.strip(),
+                str(inv.issue_date),
+                str(inv.total_with_tax),
+            )
+            by_fields[key].append(inv)
+
+    for key_tuple, invs in by_fields.items():
+        if len(invs) >= 2:
+            key_str = f"销方税号{key_tuple[0]} / 购方税号{key_tuple[1]} / {key_tuple[2]} / ¥{key_tuple[3]}"
+            groups.append(DuplicateGroup(
+                reason="关键字段完全一致",
+                duplicate_key=key_str,
+                invoices=[InvoiceResponse.model_validate(inv) for inv in invs],
+            ))
+
+    total_duplicates = sum(len(g.invoices) for g in groups)
+    return DuplicateCheckResponse(
+        total_groups=len(groups),
+        total_duplicates=total_duplicates,
+        groups=groups,
+    )
+
+
 @router.get("/{invoice_id}", response_model=InvoiceDetailResponse)
 async def get_invoice(
     invoice_id: int,
@@ -364,9 +427,10 @@ async def get_invoice(
 @router.get("/{invoice_id}/file")
 async def get_invoice_file(
     invoice_id: int,
+    download: bool = False,
     db: AsyncSession = Depends(get_db)
 ):
-    """获取发票原始文件"""
+    """获取发票原始文件，download=true 时触发下载，否则内联显示"""
     from fastapi.responses import Response
     from urllib.parse import quote
 
@@ -386,11 +450,12 @@ async def get_invoice_file(
 
     # URL-encode filename for Content-Disposition header (RFC 5987)
     encoded_filename = quote(invoice.file_name)
+    disposition = "attachment" if download else "inline"
 
     return Response(
         content=invoice.file_data,
         media_type=content_type_map.get(invoice.file_type, "application/octet-stream"),
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"}
+        headers={"Content-Disposition": f"{disposition}; filename*=UTF-8''{encoded_filename}"}
     )
 
 

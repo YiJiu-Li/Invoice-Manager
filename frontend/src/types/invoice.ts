@@ -114,6 +114,18 @@ export interface UploadResponse {
   message: string;
 }
 
+export interface DuplicateGroup {
+  reason: string;
+  duplicate_key: string;
+  invoices: Invoice[];
+}
+
+export interface DuplicateCheckResponse {
+  total_groups: number;
+  total_duplicates: number;
+  groups: DuplicateGroup[];
+}
+
 // LLM Configuration Types
 export interface LLMProviderInfo {
   name: string;

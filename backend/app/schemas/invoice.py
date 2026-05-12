@@ -159,3 +159,17 @@ class ResolveDiffRequest(BaseModel):
     """Request to resolve a parsing diff by selecting a source value."""
     source: str = Field(..., description="'ocr', 'llm', or 'custom'")
     custom_value: Optional[str] = Field(None, description="Custom value if source is 'custom'")
+
+
+class DuplicateGroup(BaseModel):
+    """A group of invoices detected as duplicates."""
+    reason: str = Field(description="重复原因，如'发票号码相同'或'关键字段完全一致'")
+    duplicate_key: str = Field(description="重复依据的字段值")
+    invoices: List[InvoiceResponse]
+
+
+class DuplicateCheckResponse(BaseModel):
+    """Response for duplicate detection."""
+    total_groups: int = Field(description="重复组数")
+    total_duplicates: int = Field(description="涉及的重复发票总数")
+    groups: List[DuplicateGroup]

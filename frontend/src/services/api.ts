@@ -10,6 +10,7 @@ import type {
   LLMConfigResponse,
   LLMTestResponse,
   ModelsResponse,
+  DuplicateCheckResponse,
 } from '../types/invoice';
 
 const api = axios.create({
@@ -62,8 +63,8 @@ export const getInvoice = async (id: number): Promise<InvoiceDetail> => {
 };
 
 // Get invoice file URL
-export const getInvoiceFileUrl = (id: number): string => {
-  return `/api/invoices/${id}/file`;
+export const getInvoiceFileUrl = (id: number, download = false): string => {
+  return download ? `/api/invoices/${id}/file?download=true` : `/api/invoices/${id}/file`;
 };
 
 // Update invoice
@@ -162,6 +163,12 @@ export const batchReprocessInvoices = async (
   const response = await api.post('/invoices/batch-reprocess', {
     invoice_ids: invoiceIds,
   });
+  return response.data;
+};
+
+// Check duplicates
+export const checkDuplicates = async (): Promise<DuplicateCheckResponse> => {
+  const response = await api.get('/invoices/duplicates');
   return response.data;
 };
 

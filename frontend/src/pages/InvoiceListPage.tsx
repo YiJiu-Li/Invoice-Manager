@@ -22,11 +22,12 @@ import {
   ReloadOutlined,
   DownloadOutlined,
   SyncOutlined,
+  CopyOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
-import { listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, getStatistics } from '../services/api';
-import type { Invoice, Statistics } from '../types/invoice';
+import { listInvoices, deleteInvoice, batchUpdateInvoices, batchDeleteInvoices, batchReprocessInvoices, getStatistics, checkDuplicates } from '../services/api';
+import type { Invoice, Statistics, DuplicateGroup } from '../types/invoice';
 import { InvoiceStatus } from '../types/invoice';
 import ResizableTitle from '../components/ResizableTitle';
 import ColumnSelector from '../components/ColumnSelector';
@@ -56,6 +57,26 @@ function InvoiceListPage() {
   const [pageSize, setPageSize] = useState(20);
   const [selectedRowKeys, setSelectedRowKeys] = useState<number[]>([]);
   const [statistics, setStatistics] = useState<Statistics | null>(null);
+
+  // Duplicate check state
+  const [dupLoading, setDupLoading] = useState(false);
+  const [dupModalOpen, setDupModalOpen] = useState(false);
+  const [dupGroups, setDupGroups] = useState<DuplicateGroup[]>([]);
+  const [dupSummary, setDupSummary] = useState({ total_groups: 0, total_duplicates: 0 });
+
+  const handleCheckDuplicates = async () => {
+    setDupLoading(true);
+    try {
+      const result = await checkDuplicates();
+      setDupGroups(result.groups);
+      setDupSummary({ total_groups: result.total_groups, total_duplicates: result.total_duplicates });
+      setDupModalOpen(true);
+    } catch {
+      message.error('查重失败');
+    } finally {
+      setDupLoading(false);
+    }
+  };
 
   // Filters
   const [statusFilter, setStatusFilter] = useState<string | undefined>();
@@ -550,6 +571,14 @@ function InvoiceListPage() {
         </div>
         <div className={styles.headerActions}>
           <Button
+            icon={<CopyOutlined />}
+            onClick={handleCheckDuplicates}
+            loading={dupLoading}
+            className={styles.secondaryButton}
+          >
+            查重
+          </Button>
+          <Button
             icon={<DownloadOutlined />}
             onClick={() => handleExport('excel')}
             className={styles.secondaryButton}
@@ -743,6 +772,93 @@ function InvoiceListPage() {
           />
         </div>
       </div>
+
+      {/* Duplicate Check Modal */}
+      <Modal
+        title={
+          <span>
+            <CopyOutlined style={{ marginRight: 8, color: '#faad14' }} />
+            查重结果
+            {dupSummary.total_groups > 0 && (
+              <span style={{ marginLeft: 12, fontSize: 13, fontWeight: 400, color: '#ff4d4f' }}>
+                发现 {dupSummary.total_groups} 组重复，共 {dupSummary.total_duplicates} 张发票
+              </span>
+            )}
+          </span>
+        }
+        open={dupModalOpen}
+        onCancel={() => setDupModalOpen(false)}
+        footer={<Button onClick={() => setDupModalOpen(false)}>关闭</Button>}
+        width={900}
+        style={{ top: 40 }}
+        styles={{ body: { maxHeight: 'calc(80vh - 110px)', overflowY: 'auto', padding: '16px 24px' } }}
+      >
+        {dupGroups.length === 0 ? (
+          <div style={{ textAlign: 'center', padding: '40px 0', color: '#52c41a', fontSize: 16 }}>
+            ✓ 未发现重复发票
+          </div>
+        ) : (
+          dupGroups.map((group, idx) => (
+            <div key={idx} style={{ marginBottom: 24 }}>
+              <div style={{
+                background: '#fff7e6',
+                border: '1px solid #ffd591',
+                borderRadius: 6,
+                padding: '8px 14px',
+                marginBottom: 8,
+                display: 'flex',
+                alignItems: 'center',
+                gap: 12,
+              }}>
+                <Tag color="warning">{group.reason}</Tag>
+                <span style={{ fontSize: 13, color: '#595959', wordBreak: 'break-all' }}>
+                  {group.duplicate_key}
+                </span>
+                <span style={{ marginLeft: 'auto', fontSize: 12, color: '#8c8c8c' }}>
+                  {group.invoices.length} 张
+                </span>
+              </div>
+              <Table
+                size="small"
+                rowKey="id"
+                dataSource={group.invoices}
+                pagination={false}
+                scroll={{ x: 800 }}
+                columns={[
+                  { title: 'ID', dataIndex: 'id', width: 60 },
+                  { title: '发票号码', dataIndex: 'invoice_number', width: 140, render: (v) => v || '-' },
+                  { title: '开票日期', dataIndex: 'issue_date', width: 100, render: (v) => v || '-' },
+                  { title: '销售方', dataIndex: 'seller_name', width: 160, ellipsis: true, render: (v) => v || '-' },
+                  { title: '购买方', dataIndex: 'buyer_name', width: 160, ellipsis: true, render: (v) => v || '-' },
+                  {
+                    title: '价税合计',
+                    dataIndex: 'total_with_tax',
+                    width: 110,
+                    align: 'right' as const,
+                    render: (v) => (v != null ? `¥${Number(v).toFixed(2)}` : '-'),
+                  },
+                  { title: '状态', dataIndex: 'status', width: 80, render: (v) => <Tag color={statusColors[v] || 'default'}>{v}</Tag> },
+                  {
+                    title: '操作',
+                    width: 70,
+                    fixed: 'right' as const,
+                    render: (_, record) => (
+                      <Button
+                        type="link"
+                        size="small"
+                        icon={<EyeOutlined />}
+                        onClick={() => { setDupModalOpen(false); navigate(`/invoices/${record.id}`); }}
+                      >
+                        详情
+                      </Button>
+                    ),
+                  },
+                ]}
+              />
+            </div>
+          ))
+        )}
+      </Modal>
     </div>
   );
 }

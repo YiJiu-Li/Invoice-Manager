@@ -7,6 +7,9 @@
 
 **v0.3.0** | Latest Release: 2026-01-24
 
+> **Fork 说明** | 本仓库由 [YiJiu-Li](https://github.com/YiJiu-Li) 在原项目基础上二次开发，新增查重、PDF预览动态调整等功能。
+> 原项目地址：[stone16/Invoice-Manager](https://github.com/stone16/Invoice-Manager)
+
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688.svg)](https://fastapi.tiangolo.com/)
